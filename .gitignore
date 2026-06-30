@@ -1,0 +1,26 @@
+# Dependências (Composer)
+/vendor/
+
+# Lock só faz sentido em aplicação; em pacote/lib não se versiona
+composer.lock
+
+# Cache do PHPUnit
+.phpunit.result.cache
+.phpunit.cache/
+
+# Cobertura / artefatos de build
+/build/
+/coverage/
+
+# IDE / editor
+/.idea/
+/.vscode/
+
+# Ambiente local
+.env
+.env.*
+!.env.example
+
+# Sistema operacional
+.DS_Store
+Thumbs.db

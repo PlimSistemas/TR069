@@ -1,0 +1,45 @@
+{
+    "name": "plimsistemas/tr069",
+    "description": "Laravel package for managing devices via TR-069 protocol using GenieACS API",
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Plim Sistemas",
+            "email": "danilo@netws.com.br"
+        }
+    ],
+    "require": {
+        "php": "^8.1",
+        "illuminate/support": "^10.0|^11.0|^12.0|^13.0",
+        "illuminate/collections": "^10.0|^11.0|^12.0|^13.0",
+        "guzzlehttp/guzzle": "^7.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^8.0|^9.0|^10.0",
+        "phpunit/phpunit": "^10.0|^11.0|^12.0",
+        "mockery/mockery": "^1.6"
+    },
+    "autoload": {
+        "psr-4": {
+            "Plimsistemas\\TR069\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Plimsistemas\\TR069\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Plimsistemas\\TR069\\TR069ServiceProvider"
+            ],
+            "aliases": {
+                "TR069": "Plimsistemas\\TR069\\Facades\\TR069"
+            }
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

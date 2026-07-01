@@ -128,6 +128,15 @@ abstract class FiberHomeDevice extends AbstractDevice
     ];
 
     /**
+     * Folga (µs) entre os connection_requests do fluxo de criação de WAN.
+     * Validado ao vivo (HG6143D): com `addObject` SEM ponto final o firmware aplica
+     * síncrono mesmo com folga 0 (5/5 OK) — o 202 antigo era do ponto final, não da
+     * pressa. Mantemos um colchão pequeno como seguro p/ ONUs mais lentas em
+     * produção. Ajustável via 3º param de `createWan()`.
+     */
+    private const WAN_STEP_DELAY_US = 250_000; // 250 ms
+
+    /**
      * Modos de segurança (BeaconType + cifra + auth) — vocabulário TR-098 padrão,
      * igual ao da ZTE. Mapa: modo canônico → [BeaconType, EncryptionModes, AuthMode].
      */
@@ -426,20 +435,20 @@ abstract class FiberHomeDevice extends AbstractDevice
     /**
      * Cria uma nova WAN (fluxo homologado do HG6143D): `addObject` do
      * WANConnectionDevice → descobre a instância criada → `addObject` da conexão
-     * (IP/PPP) → grava os parâmetros. Cada passo espera ~1s (o firmware precisa de
-     * folga entre connection_requests). Faz **rollback** (`deleteObject`) se algo
-     * falhar depois de criar o WCD. Retorna o índice do WANConnectionDevice criado.
+     * (IP/PPP) → grava os parâmetros. Entre os passos há uma folga curta
+     * (`$stepDelayUs`, padrão WAN_STEP_DELAY_US). Faz **rollback** (`deleteObject`)
+     * se algo falhar depois de criar o WCD. Retorna o índice do WCD criado.
      *
      * @param  array<string,mixed> $config  config canônica (ver buildWanWrite)
      * @throws \RuntimeException  em qualquer falha (rollback já aplicado)
      */
-    public function createWan(array $config, int $timeoutMs = 30000): int
+    public function createWan(array $config, int $timeoutMs = 30000, int $stepDelayUs = self::WAN_STEP_DELAY_US): int
     {
         $root    = $this->wanRootPath() . '.1.WANConnectionDevice';
         $isPppoe = strtolower((string) ($config['mode'] ?? 'dhcp')) === 'pppoe';
 
         // 0) Remove WANs órfãs (WCD sem conexão) — resíduo de tentativas interrompidas.
-        $this->clearUnusedWans($timeoutMs);
+        $this->clearUnusedWans($timeoutMs, $stepDelayUs);
 
         // 1) Estado atual: instâncias WCD e WanIndex internos em uso.
         $before    = $this->getObjectInstances($root, $timeoutMs);
@@ -464,11 +473,11 @@ abstract class FiberHomeDevice extends AbstractDevice
         }
 
         // 3) Cria o WANConnectionDevice.
-        usleep(1_000_000);
+        usleep($stepDelayUs);
         if (! $this->addObject($root, $timeoutMs)) {
             throw new \RuntimeException('Falha ao criar o WANConnectionDevice (addObject não aplicou).');
         }
-        usleep(1_000_000);
+        usleep($stepDelayUs);
 
         // 4) Descobre a instância recém-criada.
         $after  = $this->getObjectInstances($root, $timeoutMs);
@@ -485,21 +494,21 @@ abstract class FiberHomeDevice extends AbstractDevice
 
         try {
             // 5) Cria a conexão (IP ou PPP).
-            usleep(1_000_000);
+            usleep($stepDelayUs);
             $connObj = $root . '.' . $newWcd . '.' . ($isPppoe ? 'WANPPPConnection' : 'WANIPConnection');
             if (! $this->addObject($connObj, $timeoutMs)) {
                 throw new \RuntimeException('Falha ao criar a conexão WAN (addObject não aplicou).');
             }
 
             // 6) Grava os parâmetros.
-            usleep(1_000_000);
+            usleep($stepDelayUs);
             $config['wan_index'] = $wanIndex;
             if (! $this->writeWanParams($newWcd, $config, $timeoutMs)) {
                 throw new \RuntimeException('Falha ao gravar os parâmetros da WAN.');
             }
         }
         catch (\Throwable $e) {
-            usleep(1_000_000);
+            usleep($stepDelayUs);
 
             try {
                 $this->deleteObject($root . '.' . $newWcd, $timeoutMs);
@@ -538,7 +547,7 @@ abstract class FiberHomeDevice extends AbstractDevice
      * meio, antes de criar a conexão). Espelha o `ClearUnsedWan` do Delphi.
      * Retorna quantos removeu.
      */
-    public function clearUnusedWans(int $timeoutMs = 30000): int
+    public function clearUnusedWans(int $timeoutMs = 30000, int $stepDelayUs = self::WAN_STEP_DELAY_US): int
     {
         $root    = $this->wanRootPath() . '.1.WANConnectionDevice';
         $removed = 0;
@@ -548,7 +557,7 @@ abstract class FiberHomeDevice extends AbstractDevice
             $ppp = (int) ($inst['WANPPPConnectionNumberOfEntries'] ?? 0);
 
             if ($ip === 0 && $ppp === 0) {
-                usleep(1_000_000);
+                usleep($stepDelayUs);
                 if ($this->deleteObject($root . '.' . $num, $timeoutMs)) {
                     $removed++;
                 }

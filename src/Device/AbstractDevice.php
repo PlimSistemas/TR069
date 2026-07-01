@@ -158,6 +158,62 @@ abstract class AbstractDevice implements DeviceInterface
     }
 
     /**
+     * Cria uma nova instância de um objeto multi-instância (GenieACS `addObject`).
+     * `$objectPath` é o objeto PAI (ex.: `...WANConnectionDevice` ou
+     * `...WANConnectionDevice.3.WANPPPConnection`) — o ponto final é opcional.
+     * Síncrono: retorna `true` se o device aplicou na hora, `false` se enfileirou
+     * (alguns firmwares só materializam o objeto num inform posterior).
+     */
+    public function addObject(string $objectPath, int $timeoutMs = 30000): bool
+    {
+        return $this->client->executeTask($this->deviceInfo->id, [
+            'name'       => 'addObject',
+            'objectName' => rtrim($objectPath, '.'), // SEM ponto final (senão alguns firmwares faltam a task)
+        ], $timeoutMs);
+    }
+
+    /**
+     * Remove uma instância de objeto (GenieACS `deleteObject`). `$objectPath` é a
+     * instância completa (ex.: `...WANConnectionDevice.3`) — sem ponto final.
+     */
+    public function deleteObject(string $objectPath, int $timeoutMs = 30000): bool
+    {
+        return $this->client->executeTask($this->deviceInfo->id, [
+            'name'       => 'deleteObject',
+            'objectName' => rtrim($objectPath, '.'),
+        ], $timeoutMs);
+    }
+
+    /**
+     * Cria uma WAN via TR-069 e retorna o índice do WANConnectionDevice criado.
+     * O fluxo (addObject + parâmetros) é específico por fabricante — a base não
+     * suporta. Ver `FiberHomeDevice::createWan()`.
+     *
+     * @param  array<string,mixed> $config
+     */
+    public function createWan(array $config, int $timeoutMs = 30000): int
+    {
+        throw new DeviceNotSupportedException('Criação de WAN via TR-069 não suportada para este modelo.');
+    }
+
+    /**
+     * Edita uma WAN existente (`$index` = nº do WANConnectionDevice). Específico
+     * por fabricante — a base não suporta.
+     *
+     * @param  array<string,mixed> $config
+     */
+    public function updateWan(int $index, array $config, int $timeoutMs = 30000): bool
+    {
+        throw new DeviceNotSupportedException('Edição de WAN via TR-069 não suportada para este modelo.');
+    }
+
+    /** Remove uma WAN (`$index` = nº do WANConnectionDevice). A base não suporta. */
+    public function deleteWan(int $index, int $timeoutMs = 30000): bool
+    {
+        throw new DeviceNotSupportedException('Exclusão de WAN via TR-069 não suportada para este modelo.');
+    }
+
+    /**
      * Escreve várias leaves de um objeto via TR-069 e CONFIRMA de forma SÍNCRONA
      * (connection request, igual aos refresh dos get*). Cada chave canônica é
      * resolvida para `$basePath . '.' . $map[$key]`; chaves fora do mapa e

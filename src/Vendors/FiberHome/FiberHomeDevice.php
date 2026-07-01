@@ -259,4 +259,260 @@ abstract class FiberHomeDevice extends AbstractDevice
 
         return in_array(strtolower(trim((string) $v)), ['1', 'true', 'yes', 'enabled', 'on'], true);
     }
+
+    /**
+     * Monta os parâmetros TR-069 (paths completos → valor) de uma WAN do FiberHome
+     * no WANConnectionDevice `$index`. Derivado de capturas reais (HG6143D, dumps
+     * fh1–fh6). Tipos suportados: `dhcp`, `static`, `pppoe` (bridge fora de escopo).
+     *
+     *  - DHCP/Static → WANIPConnection.1 (AddressingType DHCP/Static)
+     *  - PPPoE       → WANPPPConnection.1 (Username/Password/ConnectionTrigger)
+     *  - VLAN/COS/Enable/Mode/WanIndex → X_FH_WANGponLinkConfig (nível WCD)
+     *  - LAN binding → X_FH_LanInterface (CSV de paths LANEth/WLANConfiguration)
+     *
+     * @param  array<string,mixed> $v  config canônica da WAN
+     * @return array<string,mixed>     path completo → valor
+     */
+    public function buildWanWrite(int $index, array $v): array
+    {
+        $mode     = strtolower((string) ($v['mode'] ?? 'dhcp'));   // dhcp | static | pppoe
+        $isPppoe  = $mode === 'pppoe';
+        $service  = strtoupper((string) ($v['service'] ?? 'INTERNET'));
+        $type     = strtolower((string) ($v['type'] ?? 'route'));  // route (bridge fora de escopo)
+        $wanIndex = (int) ($v['wan_index'] ?? $index);             // índice interno da ONU (≠ instância WCD)
+
+        // Só serviços de INTERNET roteados recebem IP mode / DS-lite / LAN binding.
+        $routeNeeded = $type === 'route'
+            && in_array($service, ['INTERNET', 'TR069_INTERNET', 'VOIP_INTERNET', 'TR069_VOIP_INTERNET'], true);
+
+        $wcd  = $this->wanRootPath() . '.1.WANConnectionDevice.' . $index;
+        $conn = $wcd . '.' . ($isPppoe ? 'WANPPPConnection' : 'WANIPConnection') . '.1';
+        $gpon = $wcd . '.X_FH_WANGponLinkConfig';
+
+        $enabled = array_key_exists('enabled', $v) ? (bool) $v['enabled'] : true;
+
+        $p = [];
+
+        // ── Conexão ──
+        $p["{$conn}.Enable"]           = $enabled;
+        $p["{$conn}.ConnectionType"]   = 'IP_Routed';
+        $p["{$conn}.X_FH_ServiceList"] = $service;
+
+        if ($isPppoe) {
+            if (isset($v['username'])) {
+                $p["{$conn}.Username"] = (string) $v['username'];
+            }
+            if (isset($v['password']) && $v['password'] !== '') {
+                $p["{$conn}.Password"] = (string) $v['password'];
+            }
+            $p["{$conn}.ConnectionTrigger"] = 'AlwaysOn';
+            if (isset($v['mtu'])) {
+                $p["{$conn}.MaxMRUSize"] = (int) $v['mtu'];
+            }
+        }
+        else {
+            $p["{$conn}.AddressingType"] = $mode === 'static' ? 'Static' : 'DHCP';
+            if (isset($v['mtu'])) {
+                $p["{$conn}.MaxMTUSize"] = (int) $v['mtu'];
+            }
+            if ($mode === 'static') {
+                if (isset($v['ip'])) {
+                    $p["{$conn}.ExternalIPAddress"] = (string) $v['ip'];
+                }
+                if (isset($v['mask'])) {
+                    $p["{$conn}.SubnetMask"] = (string) $v['mask'];
+                }
+                if (isset($v['gateway'])) {
+                    $p["{$conn}.DefaultGateway"] = (string) $v['gateway'];
+                }
+
+                $dns = array_values(array_filter([$v['dns1'] ?? null, $v['dns2'] ?? null], fn ($d) => $d !== null && $d !== ''));
+                if ($dns !== []) {
+                    $p["{$conn}.DNSServers"] = implode(',', $dns);
+                }
+            }
+        }
+
+        // Opcionais comuns (só gravados quando informados).
+        if (array_key_exists('nat', $v)) {
+            $p["{$conn}.NATEnabled"] = (bool) $v['nat'];
+        }
+        if (array_key_exists('dns_relay', $v)) {
+            $p["{$conn}.DNSEnabled"] = (bool) $v['dns_relay'];
+        }
+        if (array_key_exists('upnp', $v)) {
+            $p["{$conn}.UPNPControl"] = $v['upnp'] ? 1 : 0;
+        }
+
+        // Extras só para serviço de INTERNET roteado.
+        if ($routeNeeded) {
+            $p["{$conn}.X_FH_Dslite_Enable"] = false;
+            $p["{$conn}.X_FH_IPMode"]        = 1; // IPv4
+
+            $bind = ! empty($v['lan_bind']) ? $this->wanLanBindPaths((array) $v['lan_bind']) : '';
+            if ($bind !== '') {
+                $p["{$conn}.X_FH_LanInterface"] = $bind;
+            }
+        }
+
+        // ── Nível WANConnectionDevice (link GPON / VLAN / COS) — Mode de escrita = 1. ──
+        if (isset($v['cos'])) {
+            $p["{$gpon}.802-1pMark"] = (int) $v['cos'];
+        }
+        $p["{$gpon}.Enable"] = $enabled;
+        $p["{$gpon}.Mode"]   = 1;
+        if (isset($v['vlan'])) {
+            $p["{$gpon}.VLANID"]     = (int) $v['vlan'];
+            $p["{$gpon}.VLANIDMark"] = (int) $v['vlan'];
+        }
+        $p["{$gpon}.WanIndex"] = $wanIndex;
+
+        return $p;
+    }
+
+    /**
+     * Converte nomes amigáveis de interface (LAN1-4, SSID1-8) nos paths TR-069 que
+     * o `X_FH_LanInterface` espera (CSV).
+     *
+     * @param  array<int,string> $names
+     */
+    private function wanLanBindPaths(array $names): string
+    {
+        $base  = 'InternetGatewayDevice.LANDevice.1';
+        $paths = [];
+        foreach ($names as $n) {
+            if (preg_match('/^LAN(\d+)$/i', trim((string) $n), $m)) {
+                $paths[] = "{$base}.LANEthernetInterfaceConfig.{$m[1]}";
+            }
+            elseif (preg_match('/^SSID(\d+)$/i', trim((string) $n), $m)) {
+                $paths[] = "{$base}.WLANConfiguration.{$m[1]}";
+            }
+        }
+
+        return implode(',', $paths);
+    }
+
+    /**
+     * Cria uma nova WAN (fluxo homologado do HG6143D): `addObject` do
+     * WANConnectionDevice → descobre a instância criada → `addObject` da conexão
+     * (IP/PPP) → grava os parâmetros. Cada passo espera ~1s (o firmware precisa de
+     * folga entre connection_requests). Faz **rollback** (`deleteObject`) se algo
+     * falhar depois de criar o WCD. Retorna o índice do WANConnectionDevice criado.
+     *
+     * @param  array<string,mixed> $config  config canônica (ver buildWanWrite)
+     * @throws \RuntimeException  em qualquer falha (rollback já aplicado)
+     */
+    public function createWan(array $config, int $timeoutMs = 30000): int
+    {
+        $root    = $this->wanRootPath() . '.1.WANConnectionDevice';
+        $isPppoe = strtolower((string) ($config['mode'] ?? 'dhcp')) === 'pppoe';
+
+        // 1) Estado atual: instâncias WCD e WanIndex internos em uso.
+        $before    = $this->getObjectInstances($root, $timeoutMs);
+        $beforeWcd = array_map('intval', array_keys($before));
+        $usedIndex = [];
+        foreach ($before as $inst) {
+            if (isset($inst['X_FH_WANGponLinkConfig.WanIndex'])) {
+                $usedIndex[] = (int) $inst['X_FH_WANGponLinkConfig.WanIndex'];
+            }
+        }
+
+        // 2) Próximo WanIndex interno livre (1..16).
+        $wanIndex = 0;
+        for ($i = 1; $i <= 16; $i++) {
+            if (! in_array($i, $usedIndex, true)) {
+                $wanIndex = $i;
+                break;
+            }
+        }
+        if ($wanIndex === 0) {
+            throw new \RuntimeException('Sem WanIndex livre (máximo de 16 WANs).');
+        }
+
+        // 3) Cria o WANConnectionDevice.
+        usleep(1_000_000);
+        if (! $this->addObject($root, $timeoutMs)) {
+            throw new \RuntimeException('Falha ao criar o WANConnectionDevice (addObject não aplicou).');
+        }
+        usleep(1_000_000);
+
+        // 4) Descobre a instância recém-criada.
+        $after  = $this->getObjectInstances($root, $timeoutMs);
+        $newWcd = null;
+        foreach (array_map('intval', array_keys($after)) as $i) {
+            if (! in_array($i, $beforeWcd, true)) {
+                $newWcd = $i;
+                break;
+            }
+        }
+        if ($newWcd === null) {
+            throw new \RuntimeException('Não foi possível identificar o WANConnectionDevice criado.');
+        }
+
+        try {
+            // 5) Cria a conexão (IP ou PPP).
+            usleep(1_000_000);
+            $connObj = $root . '.' . $newWcd . '.' . ($isPppoe ? 'WANPPPConnection' : 'WANIPConnection');
+            if (! $this->addObject($connObj, $timeoutMs)) {
+                throw new \RuntimeException('Falha ao criar a conexão WAN (addObject não aplicou).');
+            }
+
+            // 6) Grava os parâmetros.
+            usleep(1_000_000);
+            $config['wan_index'] = $wanIndex;
+            if (! $this->writeWanParams($newWcd, $config, $timeoutMs)) {
+                throw new \RuntimeException('Falha ao gravar os parâmetros da WAN.');
+            }
+        }
+        catch (\Throwable $e) {
+            usleep(1_000_000);
+
+            try {
+                $this->deleteObject($root . '.' . $newWcd, $timeoutMs);
+            }
+            catch (\Throwable) {
+                // best-effort
+            }
+
+            throw $e;
+        }
+
+        return $newWcd;
+    }
+
+    /**
+     * Edita uma WAN existente (só `setParameterValues`, síncrono). `$index` = nº do
+     * WANConnectionDevice.
+     *
+     * @param  array<string,mixed> $config
+     */
+    public function updateWan(int $index, array $config, int $timeoutMs = 30000): bool
+    {
+        return $this->writeWanParams($index, $config, $timeoutMs);
+    }
+
+    /** Remove uma WAN (o WANConnectionDevice inteiro). `$index` = nº do WCD. */
+    public function deleteWan(int $index, int $timeoutMs = 30000): bool
+    {
+        return $this->deleteObject($this->wanRootPath() . '.1.WANConnectionDevice.' . $index, $timeoutMs);
+    }
+
+    /** Executa o setParameterValues (síncrono) dos pares do buildWanWrite. */
+    private function writeWanParams(int $index, array $config, int $timeoutMs): bool
+    {
+        $pairs = $this->buildWanWrite($index, $config);
+        if ($pairs === []) {
+            return false;
+        }
+
+        $parameterValues = [];
+        foreach ($pairs as $path => $val) {
+            $parameterValues[] = [$path, $val];
+        }
+
+        return $this->client->executeTask($this->deviceInfo->id, [
+            'name'            => 'setParameterValues',
+            'parameterValues' => $parameterValues,
+        ], $timeoutMs);
+    }
 }

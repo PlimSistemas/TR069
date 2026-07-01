@@ -438,6 +438,9 @@ abstract class FiberHomeDevice extends AbstractDevice
         $root    = $this->wanRootPath() . '.1.WANConnectionDevice';
         $isPppoe = strtolower((string) ($config['mode'] ?? 'dhcp')) === 'pppoe';
 
+        // 0) Remove WANs órfãs (WCD sem conexão) — resíduo de tentativas interrompidas.
+        $this->clearUnusedWans($timeoutMs);
+
         // 1) Estado atual: instâncias WCD e WanIndex internos em uso.
         $before    = $this->getObjectInstances($root, $timeoutMs);
         $beforeWcd = array_map('intval', array_keys($before));
@@ -526,6 +529,33 @@ abstract class FiberHomeDevice extends AbstractDevice
     public function deleteWan(int $index, int $timeoutMs = 30000): bool
     {
         return $this->deleteObject($this->wanRootPath() . '.1.WANConnectionDevice.' . $index, $timeoutMs);
+    }
+
+    /**
+     * Remove WANConnectionDevices **órfãos** — os que não têm nenhuma conexão
+     * (`WANIPConnectionNumberOfEntries` = 0 E `WANPPPConnectionNumberOfEntries` = 0).
+     * Resíduo típico de um `createWan` interrompido (navegador/processo morto no
+     * meio, antes de criar a conexão). Espelha o `ClearUnsedWan` do Delphi.
+     * Retorna quantos removeu.
+     */
+    public function clearUnusedWans(int $timeoutMs = 30000): int
+    {
+        $root    = $this->wanRootPath() . '.1.WANConnectionDevice';
+        $removed = 0;
+
+        foreach ($this->getObjectInstances($root, $timeoutMs) as $num => $inst) {
+            $ip  = (int) ($inst['WANIPConnectionNumberOfEntries'] ?? 0);
+            $ppp = (int) ($inst['WANPPPConnectionNumberOfEntries'] ?? 0);
+
+            if ($ip === 0 && $ppp === 0) {
+                usleep(1_000_000);
+                if ($this->deleteObject($root . '.' . $num, $timeoutMs)) {
+                    $removed++;
+                }
+            }
+        }
+
+        return $removed;
     }
 
     /** Executa o setParameterValues (síncrono) dos pares do buildWanWrite. */

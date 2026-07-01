@@ -54,10 +54,41 @@ abstract class FiberHomeDevice extends AbstractDevice
     protected function wanConnectionMap(): array
     {
         return array_merge(parent::wanConnectionMap(), [
-            'service' => 'X_FH_ServiceList',
-            'vlan'    => 'X_FH_WANGponLinkConfig.VLANID',
-            'cos'     => 'X_FH_WANGponLinkConfig.802-1pMark',
+            'service'       => 'X_FH_ServiceList',
+            'vlan'          => 'X_FH_WANGponLinkConfig.VLANID',
+            'cos'           => 'X_FH_WANGponLinkConfig.802-1pMark',
+            // Extras p/ pré-preencher a edição (vão para $extra do WanConnection):
+            'mtu'           => 'MaxMTUSize',        // IP (DHCP/Static)
+            'mtu_ppp'       => 'MaxMRUSize',        // PPPoE
+            'dns_relay'     => 'DNSEnabled',
+            'upnp'          => 'UPNPControl',
+            'lan_interface' => 'X_FH_LanInterface', // CSV de paths → LAN/SSID
         ]);
+    }
+
+    /**
+     * Converte o `X_FH_LanInterface` (CSV de paths TR-069) de volta em nomes
+     * amigáveis (LAN1-4 / SSID1-8) — inverso de `wanLanBindPaths()`, p/ prefill.
+     *
+     * @return array<int,string>
+     */
+    public static function parseWanLanBind(?string $csv): array
+    {
+        if ($csv === null || trim($csv) === '') {
+            return [];
+        }
+
+        $names = [];
+        foreach (explode(',', $csv) as $path) {
+            if (preg_match('/LANEthernetInterfaceConfig\.(\d+)/', $path, $m)) {
+                $names[] = 'LAN' . $m[1];
+            }
+            elseif (preg_match('/WLANConfiguration\.(\d+)/', $path, $m)) {
+                $names[] = 'SSID' . $m[1];
+            }
+        }
+
+        return $names;
     }
 
     /**
